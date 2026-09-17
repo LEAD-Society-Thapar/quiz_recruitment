@@ -4,6 +4,7 @@ import { rpc, store } from '../lib/api'
 import { firebaseConfigured, signInWithGoogle, firebaseSignOut } from '../lib/firebase'
 import { deviceId } from '../lib/device'
 import Register from './Register'
+import { SplitPage, useExamInfo } from '../components/Instructions'
 
 function GoogleMark() {
   return (
@@ -24,12 +25,14 @@ export default function StudentLogin() {
   const [busy, setBusy] = useState(false)
   const [reg, setReg] = useState(null)
   const [showPassword, setShowPassword] = useState(!firebaseConfigured)
+  const info = useExamInfo('recruitment')
 
   async function google() {
     setError(''); setBusy(true)
     try {
       await signInWithGoogle()
       const r = await rpc('student_login_google', { p_device: deviceId() })
+      store.set('entry', 'main')
       if (r.needs_registration) { setReg(r); return }   // first time: collect name/roll/ID
       store.set('student', r)
       nav('/exam')
@@ -46,6 +49,7 @@ export default function StudentLogin() {
     e.preventDefault()
     setError(''); setBusy(true)
     try {
+      store.set('entry', 'main')
       store.set('student', await rpc('student_login',
         { p_roll: roll.trim(), p_password: password, p_device: deviceId() }))
       nav('/exam')
@@ -57,13 +61,13 @@ export default function StudentLogin() {
   }
 
   if (reg) return (
-    <div className="center-page">
+    <SplitPage cfg={info}>
       <Register info={reg} onDone={() => nav('/exam')} onCancel={() => setReg(null)} />
-    </div>
+    </SplitPage>
   )
 
   return (
-    <div className="center-page">
+    <SplitPage cfg={info}>
       <div className="card narrow">
         <div className="brand-mark">LEAD Quiz</div>
         <h1>Student sign in</h1>
@@ -116,9 +120,9 @@ export default function StudentLogin() {
         )}
 
         <p className="small muted" style={{ marginTop: 16, textAlign: 'center' }}>
-          Proctor? <Link to="/admin/login">Admin portal</Link>
+          Taking the open quiz? <Link to="/">Open quiz</Link> · Proctor? <Link to="/admin/login">Admin portal</Link>
         </p>
       </div>
-    </div>
+    </SplitPage>
   )
 }

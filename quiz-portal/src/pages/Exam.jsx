@@ -9,8 +9,10 @@ import { deviceId } from '../lib/device'
 import CodeWorkspace from '../components/CodeWorkspace'
 import ChatBox from '../components/ChatBox'
 import ConsentForm, { CONSENT_VERSION } from '../components/ConsentForm'
+import { SplitPage } from '../components/Instructions'
 
 const LETTERS = 'ABCDEFGHIJ'
+const entryPath = () => (store.get('entry') === 'main' ? '/recruitment' : '/')
 const fmtClock = ms => {
   const s = Math.max(0, Math.ceil(ms / 1000))
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
@@ -76,6 +78,7 @@ export default function Exam() {
   const [mic, setMic] = useState(false)
   const [cam, setCam] = useState(false)
   const [visionReady, setVisionReady] = useState(false)
+  const [watched, setWatched] = useState(false)   // a proctor has this student open in live view
   const videoRef = useRef(null)
   const lastSent = useRef({})
   const streak = useRef({ kind: null, n: 0 })
@@ -103,8 +106,9 @@ export default function Exam() {
 
   const goLogin = useCallback(() => {
     ending.current = true
+    const home = entryPath()
     store.del('student'); releaseScreen(); releaseMic(); releaseCamera()
-    nav('/', { replace: true })
+    nav(home, { replace: true })
   }, [nav])
 
   const handleError = useCallback(err => {
@@ -152,7 +156,7 @@ export default function Exam() {
   }, [token, applyState, handleError])
 
   useEffect(() => {
-    if (!token) { nav('/', { replace: true }); return }
+    if (!token) { nav(entryPath(), { replace: true }); return }
     load()
   }, [token, nav, load])
 
@@ -331,6 +335,7 @@ export default function Exam() {
         })
         setOffset(new Date(h.server_now).getTime() - Date.now())
         setUnread(h.unread)
+        setWatched(Boolean(h.watch))
         if (h.deadline_at) setDeadline(new Date(h.deadline_at).getTime())
         if (h.flag_count != null) setFlagCount(h.flag_count)
         if (phase === 'exam') {
@@ -343,15 +348,16 @@ export default function Exam() {
         if (!handleError(e) && Object.keys(pending.current).length) setSaveState('offline')
       }
     }
-    const t = setInterval(tick, 10000)
-    tick()
-    return () => clearInterval(t)
+    // a random offset so hundreds of students who start together don't all call in the same second
+    let t
+    const first = setTimeout(() => { tick(); t = setInterval(tick, 10000) }, Math.random() * 3000)
+    return () => { clearTimeout(first); clearInterval(t) }
   }, [phase, token, load, flush, handleError])
 
   // ---------- countdown ----------
   useEffect(() => {
-    if (phase !== 'exam') return
-    const t = setInterval(() => setNow(Date.now()), 500)
+    if (phase !== 'exam' && phase !== 'instructions') return
+    const t = setInterval(() => setNow(Date.now()), phase === 'exam' ? 500 : 1000)
     return () => clearInterval(t)
   }, [phase])
 
@@ -396,6 +402,29 @@ export default function Exam() {
     const t = setInterval(run, 2500)
     return () => { stopped = true; clearInterval(t) }
   }, [phase, armed, cam, token, visionReady, exam?.config?.detect_phone])
+
+  // Live view. Sends a small still about once a second, and ONLY while a proctor has this
+  // student open. Nothing is stored: each frame overwrites the last, and stops when they stop.
+  useEffect(() => {
+    if (phase !== 'exam' || !cam || !watched) return
+    let stopped = false
+    let sending = false
+    const send = async () => {
+      if (stopped || sending) return
+      const v = videoRef.current
+      const shot = v && v.videoWidth ? captureFrame(v, { maxDim: 320, quality: 0.5 }) : null
+      if (!shot) return
+      sending = true
+      try {
+        const r = await rpc('student_live_frame', { p_token: token, p_mime: shot.mime, p_b64: shot.b64 })
+        if (r && r.watching === false) { stopped = true; setWatched(false) }
+      } catch { /* the live view must never interrupt the exam */ }
+      finally { sending = false }
+    }
+    send()
+    const t = setInterval(send, 1000)
+    return () => { stopped = true; clearInterval(t) }
+  }, [phase, cam, watched, token])
 
   // while waiting for a proctor to open the batch, poll so Start unlocks by itself
   useEffect(() => {
@@ -442,74 +471,71 @@ export default function Exam() {
     </div></div>
   )
 
-  if (phase === 'instructions') return (
-    <div className="center-page">
-      <div className="card wide">
+  if (phase === 'instructions') {
+    const who = store.get('student') || {}
+    const when = exam?.batch ? roundWhen(exam.batch.starts_at) : null
+    const startsIn = exam?.batch?.starts_at ? new Date(exam.batch.starts_at) - (now + offset) : null
+    const approval = exam?.open_quiz_approval
+    const pending = approval === 'pending'
+    const rejected = approval === 'rejected'
+    const waiting = !exam?.batch
+      ? 'You have not been assigned to a round yet. Please contact a proctor.'
+      : !cfg?.exam_open
+        ? 'The exam is not open yet. Wait for the proctor’s signal.'
+        : `${exam.batch.name} has not been started yet. This page unlocks by itself when a proctor starts your round — keep it open.`
+    return (
+    <>
+    <SplitPage cfg={cfg} minutes={exam?.batch?.duration_minutes ?? cfg?.duration_minutes}>
+      <div className="card">
         <div className="brand-mark">{cfg?.exam_title}</div>
-        <h1>Before you begin</h1>
-        <p>
-          Signed in as <b>{roll}</b>{exam?.student?.full_name ? ` · ${exam.student.full_name}` : ''}
-          {exam?.batch && <span className="badge" style={{ marginLeft: 8 }}>{exam.batch.name}</span>}
-        </p>
-        {exam?.batch && roundWhen(exam.batch.starts_at) && (
-          <p className="round-when">
-            <b>{exam.batch.name}</b> · {roundWhen(exam.batch.starts_at).date}
-            {' · '}<b>{roundWhen(exam.batch.starts_at).time}</b>
-            <span className="muted"> (IST)</span>
-          </p>
-        )}
-        <ul className="rules">
-          <li><b>{cfg?.mcq_count + cfg?.coding_count} questions</b>: {cfg?.mcq_count} multiple choice
-            {cfg?.coding_count > 0 && <> and {cfg?.coding_count} coding</>}.</li>
-          <li><b>There is no negative marking.</b> A wrong answer costs you nothing, so never leave a
-            multiple-choice question blank — answer every one.</li>
-          {cfg?.coding_count > 0 && (
-            <li>The <b>{cfg.coding_count} coding questions are optional and carry no marks</b>. They are
-              read by the panel and given written remarks, so attempt them if you have time — they can
-              only help you. Answer in Python, JavaScript, C, C++ or Java; Python and JavaScript run in
-              the editor, the rest are saved for the examiners to read.</li>
+        <h2>Your details</h2>
+        <dl className="details">
+          <dt>Name</dt><dd>{exam?.student?.full_name || who.full_name || '—'}</dd>
+          <dt>Roll number</dt><dd className="mono">{roll || '—'}</dd>
+          {who.email && <><dt>Email</dt><dd className="mono small">{who.email}</dd></>}
+          <dt>Round</dt><dd>{pending || rejected ? 'Open Quiz' : (exam?.batch?.name || '—')}</dd>
+          {approval && approval !== 'not_needed' && (
+            <><dt>Approval</dt><dd style={{ color: pending ? 'var(--warn)' : rejected ? 'var(--bad)' : 'var(--ok)' }}>
+              {pending ? 'Pending' : rejected ? 'Not approved' : 'Approved'}</dd></>
           )}
-          <li><b>Your own {exam?.batch?.duration_minutes ?? cfg?.duration_minutes}-minute timer</b> starts when you press Start.
-            It counts only while you are connected — if your internet or power fails, the clock stops until you are back.
-            It cannot run past the end of your round.</li>
-          <li>The test runs in <b>fullscreen</b>. These count as a violation:
-            <ul className="sub-rules">
-              <li>Leaving fullscreen, including by holding <b>Esc</b></li>
-              <li>Switching to another tab, window or application</li>
-              <li>Minimising the window or clicking away from the test</li>
-              <li>Pressing <b>Print Screen</b> or trying to take a screenshot</li>
-              <li>Pasting anything into the editor from outside the test</li>
-              <li>Opening developer tools</li>
-            </ul>
-          </li>
-          <li><b>{cfg?.max_flags} violations</b> and your test is submitted automatically. Your answers
-            up to that point are kept and marked.</li>
-          {cfg?.require_camera && <li><b>Your camera must stay on</b> and is monitored during the test. Keep your face visible, sit alone, and keep your phone out of sight.</li>}
-          {cfg?.require_mic && <li><b>Microphone access is required</b> for the duration of the test. Your browser will ask for permission when you press Start.</li>}
-          <li>Answers save automatically. Don’t refresh or close the browser.</li>
-          <li>Problem during the test? Use the <b>💬 Help</b> button to message a proctor — that is the
-            fastest route and it reaches whoever is free. If your issue is serious and is
-            <b> not resolved on chat</b>, call <b><a href={`tel:+91${HELPLINE}`}>{HELPLINE}</a></b>.</li>
-        </ul>
-        {!exam?.can_start && (
-          <div className="error">
-            {!exam?.batch
-              ? 'You have not been assigned to a batch yet. Please contact a proctor.'
-              : !cfg?.exam_open
-                ? 'The exam is not open yet. Wait for the proctor’s signal.'
-                : roundWhen(exam.batch.starts_at)
-                  ? `${exam.batch.name} begins at ${roundWhen(exam.batch.starts_at).time} IST on ${roundWhen(exam.batch.starts_at).date}. This page unlocks by itself when a proctor starts your round — keep it open.`
-                  : `${exam.batch.name} has not been started yet. This page will unlock automatically when a proctor starts your batch.`}
+          {when && <><dt>Scheduled</dt><dd>{when.date} · <b>{when.time}</b> <span className="muted">IST</span></dd></>}
+        </dl>
+
+        {pending ? (
+          <div className="status-box wait">
+            <div className="countdown"><b>Signed in — pending admin approval</b></div>
+            Your Thapar account is registered. An admin needs to approve it before you can start the quiz.
+            This page updates by itself as soon as you are approved — keep it open.
           </div>
-        )}
+        ) : rejected ? (
+          <div className="error">
+            Your registration for the open quiz was not approved. If you think this is a mistake, contact the
+            LEAD team on <b>9166220353</b>.
+          </div>
+        ) : exam?.can_start
+          ? <div className="status-box ok">Your round is open. Read the instructions, then start when you are ready.</div>
+          : (
+            <div className="status-box wait">
+              {startsIn != null && startsIn > 0 && cfg?.exam_open && (
+                <div className="countdown">Starts in <b className="mono">{fmtClock(startsIn)}</b></div>
+              )}
+              {waiting}
+            </div>
+          )}
         {error && <div className="error">{error}</div>}
-        <div className="row">
-          <button className="lg" onClick={() => start()} disabled={busy || !exam?.can_start}>{busy ? 'Starting…' : 'Start test in fullscreen'}</button>
-          {!exam?.can_start && <button className="ghost" onClick={load}>Refresh</button>}
+
+        <button className="lg" style={{ width: '100%', marginTop: 12 }}
+                onClick={() => start()} disabled={busy || !exam?.can_start}>
+          {busy ? 'Starting…' : exam?.can_start ? 'Start test in fullscreen'
+            : pending ? 'Start (waiting for approval)' : 'Start (waiting for your round)'}
+        </button>
+        <div className="row" style={{ marginTop: 10 }}>
+          {!exam?.can_start && <button className="ghost sm" onClick={load}>Refresh</button>}
           <span className="spacer" />
-          <button className="ghost" onClick={signOut}>Sign out</button>
+          <button className="ghost sm" onClick={signOut}>Sign out</button>
         </div>
       </div>
+    </SplitPage>
       {showConsent && (
         <ConsentForm
           examTitle={cfg?.exam_title} roll={roll} name={exam?.student?.full_name}
@@ -519,8 +545,10 @@ export default function Exam() {
         />
       )}
       {chat}
-    </div>
-  )
+    </>
+    )
+  }
+
 
   if (phase === 'submitted') return (
     <div className="center-page"><div className="card narrow" style={{ textAlign: 'center' }}>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { rpc, store } from '../lib/api'
 import StudentDrawer from '../components/admin/StudentDrawer'
@@ -7,6 +7,8 @@ import Batches from '../components/admin/Batches'
 import Submissions from '../components/admin/Submissions'
 import Registrations from '../components/admin/Registrations'
 import Roster from '../components/admin/Roster'
+import LiveView from '../components/admin/LiveView'
+import OpenQuiz from '../components/admin/OpenQuiz'
 import StudentLive from '../components/admin/StudentLive'
 import CameraReview from '../components/admin/CameraReview'
 import { fmtLeft, fmtTime, REASON_LABEL, StatusBadge } from '../components/admin/util'
@@ -147,7 +149,7 @@ function StudentsTab({ token, batches, onChanged }) {
       </select>
       <p className="small muted">Existing students listed here are <b>moved</b> into this batch.</p>
       <textarea rows={12} value={text} onChange={e => setText(e.target.value)}
-                placeholder={'1025030923,JAILEAD,Test Student\n1025030924,PASS1234,Another Student'}
+                placeholder={'ROLL_NO,PASSWORD,Full Name'}
                 style={{ fontFamily: 'var(--mono)', fontSize: 13 }} />
       {msg && <p className="small" style={{ marginTop: 8 }}>{msg}</p>}
       <button style={{ marginTop: 10 }} disabled={busy || !text.trim()}>{busy ? 'Saving…' : 'Save students'}</button>
@@ -278,11 +280,14 @@ export default function Admin() {
   const admin = store.get('admin')
   const token = admin?.token
   const [tab, setTab] = useState('live')
+  const tabRef = useRef('live')
+  useEffect(() => { tabRef.current = tab }, [tab])
   const [data, setData] = useState(null)
   const [offset, setOffset] = useState(0)
   const [error, setError] = useState('')
   const [openRoll, setOpenRoll] = useState(null)
   const [cameraQueue, setCameraQueue] = useState(0)
+  const [watching, setWatching] = useState(null)   // { roll, name } — one student at a time
   const [, tick] = useState(0)
 
   const logout = useCallback(async (callServer = true) => {
@@ -301,10 +306,20 @@ export default function Admin() {
     }
   }, [token, logout])
 
+  // The overview carries every student. With hundreds of candidates it is refreshed every 5s
+  // only on the tabs that show that list, every 20s elsewhere, and not at all while the
+  // proctor's browser tab is hidden.
   useEffect(() => {
     if (!token) { nav('/admin/login', { replace: true }); return }
     refresh()
-    const t = setInterval(refresh, 5000)
+    let last = Date.now()
+    const t = setInterval(() => {
+      if (document.hidden) return
+      const busyTab = ['dashboard', 'submissions', 'chat', 'batches'].includes(tabRef.current)
+      if (Date.now() - last < (busyTab ? 5000 : 20000)) return
+      last = Date.now()
+      refresh()
+    }, 1000)
     const c = setInterval(() => tick(x => x + 1), 1000)
     return () => { clearInterval(t); clearInterval(c) }
   }, [token, nav, refresh])
@@ -336,7 +351,7 @@ export default function Admin() {
           ['camera', `Camera review${cameraQueue ? ` (${cameraQueue})` : ''}`], ['dashboard', 'Dashboard'],
           ['batches', 'Rounds'], ['registrations', 'Registrations'],
           ['submissions', 'Submissions'], ['chat', `Chat${unread ? ` (${unread})` : ''}`],
-          ['students', 'Students'], ['questions', 'Question bank'], ['settings', 'Settings']].map(([id, label]) => (
+          ['students', 'Students'], ['openquiz', 'Open quiz'], ['questions', 'Question bank'], ['settings', 'Settings']].map(([id, label]) => (
           <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>
         ))}
       </nav>
@@ -344,7 +359,8 @@ export default function Admin() {
       <main className="admin-main">
         {error && <div className="error">{error}</div>}
         {!data ? <p className="muted">Loading…</p> : <>
-          {tab === 'live' && <StudentLive token={token} onOpen={setOpenRoll} />}
+          {tab === 'live' && <StudentLive token={token} onOpen={setOpenRoll} batches={batches}
+                                          onWatch={s => setWatching({ roll: s.roll_no, name: s.full_name })} />}
           {tab === 'camera' && <CameraReview token={token} />}
           {tab === 'dashboard' && <Dashboard students={students} batches={batches} offset={offset} onOpen={setOpenRoll} />}
           {tab === 'batches' && <Batches token={token} batches={batches} config={data.config} onChanged={refresh} />}
@@ -353,8 +369,9 @@ export default function Admin() {
           {tab === 'submissions' && <Submissions token={token} students={students} onOpen={setOpenRoll} onChanged={refresh} />}
           {tab === 'chat' && <Inbox token={token} students={students} me={data.me} admins={data.admins || []}
                                     onOpenStudent={setOpenRoll} onChanged={refresh} />}
+          {tab === 'openquiz' && <OpenQuiz token={token} onOpen={setOpenRoll} />}
           {tab === 'students' && <>
-            <Roster token={token} onOpen={setOpenRoll} />
+            <Roster token={token} onOpen={setOpenRoll} batches={batches} />
             <details style={{ marginTop: 18 }}>
               <summary className="small muted" style={{ cursor: 'pointer' }}>
                 Add students with a roll number and password (not needed — students sign in with Google)
@@ -366,6 +383,11 @@ export default function Admin() {
           {tab === 'settings' && <SettingsTab token={token} config={data.config} onChanged={refresh} />}
         </>}
       </main>
+
+      {watching && (
+        <LiveView token={token} roll={watching.roll} name={watching.name}
+                  onClose={() => setWatching(null)} />
+      )}
 
       {openRoll && <StudentDrawer token={token} roll={openRoll} offset={offset}
                                   onClose={closeDrawer} onChanged={refresh} />}
